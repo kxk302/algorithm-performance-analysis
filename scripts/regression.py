@@ -1,11 +1,10 @@
 import argparse
-
 import importlib
 import json
+
 import numpy as np 
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import r2_score     
 from sklearn.model_selection import train_test_split
@@ -13,21 +12,31 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 
-
+# Percentage of test data
 TEST_SIZE = 0.2
+# To make random split of training and testing data repeatable
 RANDOM_STATE = 13
+# Scoring function for regression
 SCORING = 'r2'
+# Number folds in cross validation for grid search CV
 CROSS_VALIDATION_NUM_FOLD=10
+# Log level for grid search CV
 VERBOSE = 2
+# Number of jobs for grid search CV. -1 means use all avilable processors
 NUM_JOBS= -1
 
-
+# Given a dataframe as input, returns 2 lists,
+# one for categorical and one for numerical fetures
 def get_categorical_numerical_features(df):
   numerical_features = df.select_dtypes(include='number').columns.tolist()
   categorical_features = df.select_dtypes(exclude='number').columns.tolist()
   return categorical_features, numerical_features
 
 
+# Defines pipelines for numerical and categorical
+# features (to handle missing values, and do
+# scaling/encoding). Then defines a ColumnTransformer
+# to process dataframe columns based on their type
 def get_preprocessor(categorical_features, numerical_features):
   numerical_pipeline = Pipeline(steps=[
     ('impute', SimpleImputer(strategy='median')),
@@ -47,6 +56,81 @@ def get_preprocessor(categorical_features, numerical_features):
   return preprocessor
 
 
+# Iterate over each model in models file
+#
+# models:
+#   dictionary containing the contents of models file (model name, module, class name, and parameters)
+#
+# preprocessor:
+#   To preprocess training data
+#
+# input_file:
+#   The models are trained on this training dataset. Goes into output file
+#
+# label_name:
+#  The input_file's column we want to predict
+#
+# X_train, y_train, X_test, y_test:
+#  train and test feature vector and labels
+#
+# o_file:
+#  File pointer to write the output
+def process_models(models, preprocessor, input_file, label_name, X_train, y_train, X_test, y_test, o_file):
+  for model_name in models:
+    print(f'model_name: {model_name}')
+    module_name = models[model_name]["module_name"]
+    class_name = models[model_name]["class_name"]
+    parameters = models[model_name]["parameters"]
+    print(f'module_name: {module_name}')
+    print(f'class_name: {class_name}')
+    print(f'parameters: {parameters}')
+
+    module = importlib.import_module(module_name)
+    class_ = getattr(module, class_name)
+    regressor = class_()
+
+    regressor_pipeline = Pipeline(steps=[
+      ('preprocessor', preprocessor),
+      ('model', regressor)
+    ])
+
+    grid_search_cv = GridSearchCV(regressor_pipeline,
+                                  parameters,
+                                  scoring=SCORING,
+                                  cv=CROSS_VALIDATION_NUM_FOLD,
+                                  verbose=VERBOSE,
+                                  n_jobs=NUM_JOBS)
+
+    _ = grid_search_cv.fit(X_train, y_train)
+    print(f'scorer_: {grid_search_cv.scorer_}')
+    print(f'\nRegressor name: {class_name}')
+    print(f'input_file: {input_file}, label_name: {label_name}')
+    print(f'Best score for {class_name}: {grid_search_cv.best_score_}')
+    print(f'Best params for {class_name}: {grid_search_cv.best_params_}')
+
+    best_params_list = [str(k) +'='+ str(v) for k,v in grid_search_cv.best_params_.items()]
+    best_params_str = ";".join(best_params_list)
+    print(f'best_params_str: {best_params_str}')
+    y_predicted = grid_search_cv.predict(X_test)
+    prediction_score = r2_score(y_test, y_predicted)
+    print(f'prediction_score: {prediction_score}')
+    o_file.write(",".join([input_file, model_name, label_name, str(grid_search_cv.best_score_), best_params_str, str(prediction_score)])+'\n')
+
+
+# input_files:
+#  Each line in this file specifies the training data file name and the column to be predicted
+#
+# models_file:
+#  Each element in this JSON file specifies the class name of a regressor, the regressor module
+#  (to be imported), and the regressor parameters we'd like to do grid search CV on
+#
+# output_file:
+#   This method iterates over each training data file, and then over each regressor model
+#   (nested loop) and performs grid search CV. The results (including test data prediction)
+#   is written to the output file. The file columns are the following:
+#
+#   input_file,regressor,label_name,best_score(r2),best_parameters,test_score(r2)
+#
 def predict(inputs_file, models_file, output_file):
   print(f'inputs_file: {inputs_file}')
   df_in = pd.read_csv(inputs_file)
@@ -94,50 +178,10 @@ def predict(inputs_file, models_file, output_file):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE)
     
     # Iterate over each model in models file
-    for model_name in models:
-      print(f'model_name: {model_name}')
-      module_name = models[model_name]["module_name"]
-      class_name = models[model_name]["class_name"]
-      parameters = models[model_name]["parameters"]
-      print(f'module_name: {module_name}')
-      print(f'class_name: {class_name}')
-      print(f'parameters: {parameters}')
-
-      module = importlib.import_module(module_name)
-      class_ = getattr(module, class_name)
-      regressor = class_()
-    
-      regressor_pipeline = Pipeline(steps=[
-        ('preprocessor', preprocessor),
-        ('model', regressor)
-      ])
-
-      grid_search_cv = GridSearchCV(regressor_pipeline,
-                                    parameters,
-                                    scoring=SCORING,
-                                    cv=CROSS_VALIDATION_NUM_FOLD,
-                                    verbose=VERBOSE,
-                                    n_jobs=NUM_JOBS)
-
-      _ = grid_search_cv.fit(X_train, y_train)
-      print(f'scorer_: {grid_search_cv.scorer_}')
-      print(f'\nRegressor name: {class_name}')
-      print(f'input_file: {input_file}, label_name: {label_name}')
-      print(f'Best score for {class_name}: {grid_search_cv.best_score_}')
-      print(f'Best params for {class_name}: {grid_search_cv.best_params_}')
-
-     
-      best_params_list = [str(k) +'='+ str(v) for k,v in grid_search_cv.best_params_.items()]
-      best_params_str = ";".join(best_params_list)
-      print(f'best_params_str: {best_params_str}')
-
-      y_predicted = grid_search_cv.predict(X_test)
-      prediction_score = r2_score(y_test, y_predicted) 
-      print(f'prediction_score: {prediction_score}')
-
-      o_file.write(",".join([input_file, model_name, label_name, str(grid_search_cv.best_score_), best_params_str, str(prediction_score)])+'\n')
+    process_models(models, preprocessor, input_file, label_name, X_train, y_train, X_test, y_test, o_file)
 
   o_file.close()
+
 
 if __name__ == '__main__':
   argument_parser = argparse.ArgumentParser('Runtime prediction argument parser')
