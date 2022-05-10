@@ -24,6 +24,103 @@ CROSS_VALIDATION_NUM_FOLD=10
 VERBOSE = 2
 # Number of jobs for grid search CV. -1 means use all avilable processors
 NUM_JOBS= -1
+# To select parameters columns in input file
+PARAMETERS = 'parameters.'
+# To select file type columns in input file
+FILETYPE = '_filetype'
+# Ignore this file type when selecting file type columns
+IGNORE_FILETYPE = 'chromInfo_filetype'
+# List of the begining of bad parameters
+BAD_STARTS=['parameters.__workflow_invocation_uuid__', 'parameters.chromInfo', 'parameters.__job_resource',
+            'parameters.reference_source', 'parameters.reference_genome', 'parameters.rg',
+            'parameters.readGroup', 'parameters.refGenomeSource', 'parameters.genomeSource']
+# List of the ending of bad parameters
+BAD_ENDS = ['id', 'identifier', '__identifier__', 'indeces']
+# If more than UNIQUE_CUTOFF of the rows have a unique value, remove the categorical feature
+UNIQUE_CUTOFF = 0.5
+# If more than NULL_CUTOFF of the rows are null, remove the feature
+NULL_CUTOFF = 0.75
+# If the number of unique values exceeds NUM_CATEGORIES_CUTOFF, remove the categorical feature
+NUM_CATEGORIES_CUTOFF = 100
+# Column to predict
+RUNTIME = 'runtime'
+
+
+def remove_bad_columns(df_in):
+  df = df_in.copy()
+
+  # Get a list of all user selected parameters
+  parameters = [col for col in df.columns.tolist() if col.startswith(PARAMETERS)]
+
+  # Get names of file types and files
+  filetypes=[col for col in df.columns.tolist() if (col.endswith(FILETYPE) and col != IGNORE_FILETYPE)]
+  files=[filetype[:-len(FILETYPE)] for filetype in filetypes]
+
+  # Remove parameters that start with BAD_STARTS
+  for bad_start in BAD_STARTS:
+    parameters = [param for param in parameters if not param.startswith(bad_start)]
+
+  # Remove parameters that end with BAD_ENDS
+  for bad_end in BAD_ENDS:
+    parameters = [param for param in parameters if not param.endswith(bad_end)]
+
+  # Populate list of bad parameters
+  bad_parameters = []
+
+  for parameter in parameters:
+    series = df[parameter].dropna()
+
+    # Trim string of "". This is necessary to check if the parameter is full of list or dict objects
+    if df[parameter].dtype==object and all(type(item)==str and item.startswith('"') and item.endswith('"') for item in series):
+      try:
+        df[parameter]=df[parameter].str[1:-1].astype(float)
+      except:
+        df[parameter]=df[parameter].str[1:-1]
+
+    # If more than UNIQUE_CUTOFF of the rows have a unique value, remove the categorical feature
+    if df[parameter].dtype==object and len(df[parameter].unique()) >= UNIQUE_CUTOFF*df.shape[0]:
+      bad_parameters.append(parameter)
+
+    # If more than NULL_CUTOFF of the rows are null, remove the feature
+    if df[parameter].isnull().sum() >= NULL_CUTOFF*df.shape[0]:
+      bad_parameters.append(parameter)
+
+    # If the number of categories is greater than NUM_CATEGORIES_CUTOFF remove
+    if df[parameter].dtype == object and len(df[parameter].unique()) >= NUM_CATEGORIES_CUTOFF:
+      bad_parameters.append(parameter)
+
+    # If the feature is a list remove
+    if all(type(item)==str and item.startswith("[") and item.endswith("]") for item in series):
+      if all(type(ast.literal_eval(item)) == list for item in series):
+        bad_parameters.append(parameter)
+
+    # If the feature is a dict remove
+    if all(type(item)==str and item.startswith("{") and item.endswith("}") for item in series):
+      if all(type(ast.literal_eval(item)) == dict for item in series):
+        bad_parameters.append(parameter)
+
+  for file in files:
+    bad_parameters.append("parameters."+file)
+    bad_parameters.append("parameters."+file+".values")
+    bad_parameters.append("parameters."+file+"|__identifier__")
+
+  for param in set(bad_parameters):
+    try:
+      parameters.remove(param)
+    except:
+      pass
+
+  hardware=[RUNTIME]
+
+  keep = parameters + filetypes + files + hardware
+
+  columns = df.columns.tolist()
+  for column in columns:
+    if not column in keep:
+      del df[column]
+
+  return df
+
 
 # Given a dataframe as input, returns 2 lists,
 # one for categorical and one for numerical fetures
@@ -150,6 +247,8 @@ def predict(inputs_file, models_file, output_file):
     label_name = row['label_name']
     print(f'input_file: {input_file}, label_name: {label_name}')
     df = pd.read_csv(input_file)
+
+    df = remove_bad_columns(df)
 
     X = df.drop(columns=[label_name], axis=1)
     y = df[label_name] 
